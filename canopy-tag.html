@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Canopy Tag</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap">
+<style>
+:root{--bg:#10201a;--panel:rgba(12,24,18,.88);--ink:#f2f7ea;--mute:#a9bfae;--lime:#b8f23c;--coral:#ff5d4d;--line:rgba(255,255,255,.14)}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:"Baloo 2",ui-rounded,system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+canvas{display:block}
+#ui{position:fixed;inset:0;display:flex;align-items:center;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));pointer-events:none}
+#card{pointer-events:auto;width:min(470px,100%);max-height:100%;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:24px;backdrop-filter:blur(8px)}
+.eyebrow{margin:0;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--lime);font-weight:700}
+h1{margin:2px 0 8px;font-size:clamp(40px,9vw,58px);line-height:.95;font-weight:800;letter-spacing:-.01em}
+h1 span{color:var(--coral)}
+p{margin:0 0 14px;color:var(--mute);font-size:17px;line-height:1.35}
+ul{margin:0 0 18px;padding:0;list-style:none;display:grid;gap:8px}
+li{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start;font-size:16px;line-height:1.3}
+li b{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:rgba(184,242,60,.16);color:var(--lime);font-size:14px}
+.opts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:18px}
+label{display:grid;gap:4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);font-weight:700}
+select{width:100%;font:inherit;font-size:16px;color:var(--ink);background:rgba(255,255,255,.08);border:1px solid var(--line);border-radius:10px;padding:8px 8px}
+select option{color:#111}
+button{width:100%;font:inherit;font-weight:800;font-size:22px;padding:13px 16px;border:0;border-radius:14px;background:var(--lime);color:#14210a;cursor:pointer}
+button:disabled{background:rgba(255,255,255,.14);color:var(--mute);cursor:not-allowed}
+button:focus-visible,select:focus-visible{outline:3px solid #fff;outline-offset:2px}
+#note{margin:12px 0 0;font-size:14px;color:var(--mute)}
+@media (max-width:520px){.opts{grid-template-columns:1fr 1fr 1fr}#card{padding:18px}}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+</head>
+<body>
+<div id="ui">
+  <div id="card">
+    <p class="eyebrow">Meta Quest 3 and 3S · WebXR</p>
+    <h1>Canopy <span>Tag</span></h1>
+    <p>You move on your hands. Plant them on the ground, walls and tree trunks and push off to launch yourself. One gorilla starts infected. Don't get touched before the clock runs out.</p>
+    <ul>
+      <li><b>1</b><span>Swing your arms down and back against surfaces to run, jump and climb.</span></li>
+      <li><b>2</b><span>Infected? Touch a survivor with a hand or your body to pass it on.</span></li>
+      <li><b>3</b><span>Right stick snaps your view. Y or B sends you back to your spawn.</span></li>
+    </ul>
+    <div class="opts">
+      <label for="optBots">Gorillas
+        <select id="optBots"><option value="4">4 bots</option><option value="6" selected>6 bots</option><option value="8">8 bots</option></select>
+      </label>
+      <label for="optDiff">Bot speed
+        <select id="optDiff"><option value="0.8">Chill</option><option value="1" selected>Normal</option><option value="1.25">Sweaty</option></select>
+      </label>
+      <label for="optTime">Round
+        <select id="optTime"><option value="90">90 s</option><option value="120" selected>120 s</option><option value="180">180 s</option></select>
+      </label>
+    </div>
+    <button id="enter" disabled>Enter VR</button>
+    <p id="note">Checking for VR support…</p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ============================== constants ============================== */
+const V3 = THREE.Vector3;
+const ARENA = 20;                         // half size of the play area (m)
+const HAND_R = 0.075, HAND_DET = 0.1;     // hand collider and touch band
+const HEAD_R = 0.2, BODY_R = 0.25, BODY_DROP = 0.75;
+const GRAV = 9.8, MAX_PUSH = 7.0, PUSH_MULT = 1.15;
+const FREEZE = 3, LOBBY = 6;
+
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; };
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const $ = id => document.getElementById(id);
+
+/* ============================== renderer ============================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+try { renderer.xr.setFoveation(0.8); } catch (e) {}
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe6f2);
+scene.fog = new THREE.Fog(0xcfe6f2, 40, 130);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 500);
+const rig = new THREE.Group();
+scene.add(rig);
+rig.add(camera);
+
+scene.add(new THREE.HemisphereLight(0xdcefff, 0x587a46, 1.05));
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.5);
+sun.position.set(14, 26, 8);
+scene.add(sun);
+
+/* sky dome with a vertex gradient */
+{
+  const g = new THREE.SphereGeometry(300, 24, 16);
+  const pos = g.attributes.position, cols = [];
+  const top = new THREE.Color(0x4aa3e8), mid = new THREE.Color(0xcfe6f2), low = new THREE.Color(0xf6e3b8);
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i) / 300;
+    const c = y > 0 ? mid.clone().lerp(top, Math.pow(y, 0.6)) : mid.clone().lerp(low, Math.min(1, -y * 3));
+    cols.push(c.r, c.g, c.b);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false })));
+}
+
+/* ground */
+{
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+  const cx = cv.getContext('2d');
+  const r = mulberry32(3);
+  cx.fillStyle = '#6cb350'; cx.fillRect(0, 0, 256, 256);
+  const shades = ['#62a846', '#76bd58', '#5a9d41', '#80c45f', '#6fb04f'];
+  for (let i = 0; i < 1600; i++) { cx.fillStyle = shades[Math.floor(r() * shades.length)]; cx.fillRect(r() * 256, r() * 256, 2 + r() * 5, 2 + r() * 5); }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(48, 48); tex.colorSpace = THREE.SRGBColorSpace;
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(170, 48), new THREE.MeshLambertMaterial({ map: tex }));
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+}
+
+/* distant hills and clouds, purely decorative */
+{
+  const hills = new THREE.InstancedMesh(new THREE.ConeGeometry(16, 20, 7), new THREE.MeshLambertMaterial({ color: 0x86b79b }), 20);
+  const m = new THREE.Matrix4(), r = mulberry32(11);
+  for (let i = 0; i < 20; i++) {
+    const a = (i / 20) * Math.PI * 2, d = 105 + r() * 25, s = 0.8 + r() * 1.0;
+    m.compose(new V3(Math.cos(a) * d, 8 * s, Math.sin(a) * d), new THREE.Quaternion(), new V3(s, s * (0.8 + r() * 0.6), s));
+    hills.setMatrixAt(i, m);
+  }
+  scene.add(hills);
+  const clouds = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }), 10);
+  for (let i = 0; i < 10; i++) {
+    const a = r() * Math.PI * 2, d = 40 + r() * 90;
+    m.compose(new V3(Math.cos(a) * d, 55 + r() * 25, Math.sin(a) * d), new THREE.Quaternion(), new V3(10 + r() * 10, 2.5 + r() * 2, 5 + r() * 5));
+    clouds.setMatrixAt(i, m);
+  }
+  scene.add(clouds);
+}
+
+/* ============================== level ============================== */
+const BOXES = [];
+function addBox(cx, y0, cz, sx, sy, sz, color, fr = 1, vis = true) {
+  BOXES.push({ min: new V3(cx - sx / 2, y0, cz - sz / 2), max: new V3(cx + sx / 2, y0 + sy, cz + sz / 2), fr, color: new THREE.Color(color), vis });
+}
+addBox(0, -10, 0, 170, 10, 170, '#000000', 1, false);          // ground (index 0)
+const WT = 2, WH = 9;                                          // arena hedges
+addBox(0, 0, -(ARENA + WT / 2), 2 * ARENA + 2 * WT, WH, WT, '#2f6a45');
+addBox(0, 0,  (ARENA + WT / 2), 2 * ARENA + 2 * WT, WH, WT, '#2f6a45');
+addBox(-(ARENA + WT / 2), 0, 0, WT, WH, 2 * ARENA, '#2f6a45');
+addBox( (ARENA + WT / 2), 0, 0, WT, WH, 2 * ARENA, '#2f6a45');
+
+const trees = [];
+{
+  const rng = mulberry32(7);
+  const placed = [];
+  const free = (x, z, r) => {
+    const rr = Math.hypot(x, z);
+    if (rr > 13 - r && rr < 17 + r) return false;                // keep the spawn ring clear
+    for (const p of placed) if (Math.hypot(p.x - x, p.z - z) < p.r + r) return false;
+    return true;
+  };
+  const reserve = (x, z, r) => placed.push({ x, z, r });
+
+  // central tower, three tiers of 0.9 m
+  addBox(0, 0, 0, 9, 0.9, 9, '#b9a98a');
+  addBox(0, 0.9, 0, 6, 0.9, 6, '#c9b894');
+  addBox(0, 1.8, 0, 3.2, 0.9, 3.2, '#ddc9a0');
+  reserve(0, 0, 6.4);
+
+  // overhead ledges around the tower
+  for (let i = 0; i < 4; i++) {
+    const a = Math.PI / 4 + i * Math.PI / 2;
+    const x = Math.cos(a) * 8.5, z = Math.sin(a) * 8.5;
+    addBox(x, 1.55, z, 3.6, 0.35, 3.6, '#8fb7a0');
+    reserve(x, z, 2.8);
+  }
+  // wall slabs for wall pushing
+  const slabs = [[-10, -5, 7, 0.7], [10, 6, 0.7, 7], [-5, 10, 7, 0.7], [5, -10, 0.7, 7]];
+  for (const [x, z, sx, sz] of slabs) { addBox(x, 0, z, sx, 2.4, sz, '#9aa7b0'); reserve(x, z, Math.max(sx, sz) / 2 + 0.6); }
+  // ice pads
+  for (let i = 0; i < 3; i++) {
+    for (let t = 0; t < 40; t++) {
+      const x = (rng() * 2 - 1) * (ARENA - 4), z = (rng() * 2 - 1) * (ARENA - 4);
+      if (free(x, z, 3)) { addBox(x, 0, z, 4, 0.3, 4, '#bfe8f7', 0.04); reserve(x, z, 3); break; }
+    }
+  }
+  // stepping blocks
+  const pal = ['#c9a66b', '#b08968', '#8d99ae', '#a3b18a', '#d4a373', '#9db4c0'];
+  for (let i = 0; i < 12; i++) {
+    for (let t = 0; t < 60; t++) {
+      const sx = 1.8 + rng() * 2.6, sz = 1.8 + rng() * 2.6, sy = 0.5 + rng() * 1.1;
+      const x = (rng() * 2 - 1) * (ARENA - 3), z = (rng() * 2 - 1) * (ARENA - 3);
+      if (free(x, z, Math.max(sx, sz) / 2 + 0.7)) { addBox(x, 0, z, sx, sy, sz, pal[i % pal.length]); reserve(x, z, Math.max(sx, sz) / 2 + 0.7); break; }
+    }
+  }
+  // trees: square trunks you can push off, round canopies for show
+  for (let i = 0; i < 26; i++) {
+    for (let t = 0; t < 60; t++) {
+      const x = (rng() * 2 - 1) * (ARENA - 2.5), z = (rng() * 2 - 1) * (ARENA - 2.5);
+      if (free(x, z, 1.7)) {
+        const h = 7 + rng() * 3;
+        addBox(x, 0, z, 0.9, h, 0.9, '#7a5a3a');
+        trees.push({ x, z, h, s: 2.3 + rng() * 0.9 });
+        reserve(x, z, 1.7); break;
+      }
+    }
+  }
+}
+const SOLID = BOXES.slice(1);
+
+/* render the level with instancing */
+{
+  const vis = BOXES.filter(b => b.vis);
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xffffff }), vis.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), r = mulberry32(5), col = new THREE.Color();
+  vis.forEach((b, i) => {
+    const sz = new V3().subVectors(b.max, b.min), c = new V3().addVectors(b.max, b.min).multiplyScalar(0.5);
+    m.compose(c, q, sz); mesh.setMatrixAt(i, m);
+    col.copy(b.color).offsetHSL(0, 0, (r() - 0.5) * 0.05); mesh.setColorAt(i, col);
+  });
+  scene.add(mesh);
+
+  const pts = [];
+  const E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  for (const b of vis) {
+    const a = b.min, z = b.max;
+    const c = [[a.x,a.y,a.z],[z.x,a.y,a.z],[z.x,a.y,z.z],[a.x,a.y,z.z],[a.x,z.y,a.z],[z.x,z.y,a.z],[z.x,z.y,z.z],[a.x,z.y,z.z]];
+    for (const e of E) pts.push(...c[e[0]], ...c[e[1]]);
+  }
+  const eg = new THREE.BufferGeometry();
+  eg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  scene.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x1b2a1f, transparent: true, opacity: 0.45 })));
+
+  const canopy = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }), trees.length * 2);
+  const greens = ['#3f9a4d', '#4fae55', '#2f8a46', '#5bb85c'];
+  trees.forEach((t, i) => {
+    m.compose(new V3(t.x, t.h + 0.6, t.z), q, new V3(t.s, t.s * 0.85, t.s)); canopy.setMatrixAt(i * 2, m);
+    canopy.setColorAt(i * 2, col.set(greens[i % greens.length]));
+    m.compose(new V3(t.x + 0.3, t.h + 2.2, t.z - 0.2), q, new V3(t.s * 0.65, t.s * 0.6, t.s * 0.65)); canopy.setMatrixAt(i * 2 + 1, m);
+    canopy.setColorAt(i * 2 + 1, col.set(greens[(i + 1) % greens.length]));
+  });
+  scene.add(canopy);
+}
+
+/* ============================== collision ============================== */
+const hitN = new V3();
+let hitF = 1;
+/* Pushes sphere centre c out of every box it overlaps. Returns true when any box is
+   within rDet. hitN gets the averaged contact normal, hitF the averaged friction. */
+function collideSphere(c, r, rDet) {
+  hitN.set(0, 0, 0);
+  let touching = false, fsum = 0, cnt = 0;
+  const rd2 = rDet * rDet;
+  for (let i = 0; i < BOXES.length; i++) {
+    const b = BOXES[i];
+    const px = clamp(c.x, b.min.x, b.max.x), py = clamp(c.y, b.min.y, b.max.y), pz = clamp(c.z, b.min.z, b.max.z);
+    const dx = c.x - px, dy = c.y - py, dz = c.z - pz;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= rd2) continue;
+    let nx = 0, ny = 0, nz = 0, dist;
+    if (d2 > 1e-12) { dist = Math.sqrt(d2); nx = dx / dist; ny = dy / dist; nz = dz / dist; }
+    else {
+      const lx = c.x - b.min.x, hx = b.max.x - c.x, ly = c.y - b.min.y, hy = b.max.y - c.y, lz = c.z - b.min.z, hz = b.max.z - c.z;
+      const ex = Math.min(lx, hx), ey = Math.min(ly, hy), ez = Math.min(lz, hz);
+      if (ex <= ey && ex <= ez) { nx = lx < hx ? -1 : 1; dist = -ex; }
+      else if (ey <= ez) { ny = ly < hy ? -1 : 1; dist = -ey; }
+      else { nz = lz < hz ? -1 : 1; dist = -ez; }
+    }
+    touching = true; hitN.x += nx; hitN.y += ny; hitN.z += nz; fsum += b.fr; cnt++;
+    if (dist < r) { const depth = r - dist; c.x += nx * depth; c.y += ny * depth; c.z += nz * depth; }
+  }
+  if (touching) { hitN.normalize(); hitF = fsum / cnt; }
+  return touching;
+}
+
+/* ============================== audio and haptics ============================== */
+let actx = null;
+function audioOn() {
+  try {
+    if (!actx) { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); }
+    if (actx && actx.state === 'suspended') actx.resume();
+  } catch (e) {}
+}
+function tone(f, d, type = 'sine', vol = 0.12, f2 = null, delay = 0) {
+  if (!actx || actx.state !== 'running') return;
+  const t = actx.currentTime + delay, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + d + 0.03);
+}
+const sfx = {
+  thump: s => tone(120 + Math.random() * 30, 0.09, 'sine', Math.min(0.25, 0.05 + s * 0.04), 60),
+  push: () => tone(220, 0.12, 'triangle', 0.05, 420),
+  tag: () => { tone(520, 0.12, 'square', 0.09, 260); tone(180, 0.25, 'sawtooth', 0.07, 70, 0.08); },
+  start: () => [392, 523, 659].forEach((f, i) => tone(f, 0.16, 'triangle', 0.12, null, i * 0.12)),
+  win: () => [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.2, 'triangle', 0.12, null, i * 0.1)),
+  lose: () => [392, 330, 262].forEach((f, i) => tone(f, 0.28, 'triangle', 0.12, null, i * 0.16)),
+  tick: () => tone(880, 0.06, 'square', 0.04)
+};
+function buzz(c, strength, ms) {
+  try {
+    const gp = c.src && c.src.gamepad;
+    if (!gp) return;
+    const a = gp.hapticActuators && gp.hapticActuators[0];
+    if (a && a.pulse) a.pulse(strength, ms);
+    else if (gp.vibrationActuator && gp.vibrationActuator.playEffect) gp.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: strength, weakMagnitude: strength });
+  } catch (e) {}
+}
+
+/* ============================== shared geometry ============================== */
+const sphereGeo = new THREE.SphereGeometry(1, 16, 12);
+const handGeo = new THREE.SphereGeometry(0.075, 14, 10);
+const armGeo = new THREE.CylinderGeometry(0.03, 0.045, 1, 8);
+const octaGeo = new THREE.OctahedronGeometry(1, 0);
+const _up = new V3(0, 1, 0), _l = new V3();
+function link(mesh, a, b) {
+  _l.subVectors(b, a);
+  const len = _l.length();
+  if (len < 1e-4) { mesh.visible = false; return; }
+  mesh.visible = true;
+  mesh.position.addVectors(a, b).multiplyScalar(0.5);
+  mesh.scale.set(1, len, 1);
+  mesh.quaternion.setFromUnitVectors(_up, _l.divideScalar(len));
+}
+
+/* ============================== game state ============================== */
+const G = {
+  state: 'lobby', stateT: 0, round: 0, timeLeft: 120, lobbyDur: 2,
+  botCount: 6, diff: 1, roundTime: 120, playerActive: false,
+  spawn: new V3(15, 0, 0), flash: null, resultLines: null, last: ''
+};
+const stats = { tags: 0, survived: 0 };
+const P = { isPlayer: true, name: 'You', pos: new V3(), vel: new V3(), evel: new V3(), infected: false };
+let bots = [], ents = [];
+let needSpawn = false;
+const headL = new V3(), headW = new V3();
+
+/* ----- player hands ----- */
+const playerMat = new THREE.MeshLambertMaterial({ color: 0x7bd34a, emissive: 0x0b2a05 });
+const ctrls = [0, 1].map(i => {
+  const ctl = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+  rig.add(ctl); rig.add(grip);
+  const c = { i, ctl, grip, src: null, side: i === 0 ? -1 : 1, prev: new V3(), valid: false, touching: false, samples: [], hw: new V3(), snapReady: true, btn: false,
+    mesh: new THREE.Mesh(handGeo, playerMat), arm: new THREE.Mesh(armGeo, playerMat) };
+  c.mesh.visible = c.arm.visible = false;
+  scene.add(c.mesh); scene.add(c.arm);
+  ctl.addEventListener('connected', e => {
+    c.src = e.data;
+    if (e.data.handedness === 'left') c.side = -1; else if (e.data.handedness === 'right') c.side = 1;
+    c.valid = false;
+  });
+  ctl.addEventListener('disconnected', () => { c.src = null; c.valid = false; c.touching = false; });
+  return c;
+});
+function updatePlayerLook() {
+  playerMat.color.set(P.infected ? 0xff5a4a : 0x7bd34a);
+  playerMat.emissive.set(P.infected ? 0x3a0a05 : 0x0b2a05);
+}
+
+/* ----- bots ----- */
+const BOT_NAMES = ['Mango', 'Bongo', 'Kiwi', 'Biscuit', 'Pepper', 'Waffles', 'Turbo', 'Nacho', 'Pickle', 'Moxie'];
+const BOT_COLS = [0x5b4636, 0x3f4350, 0x7a5230, 0x4a4a5a, 0x6b3f2a, 0x2f3b4a, 0x5d5d3a, 0x4b3b5b];
+const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff4a3a });
+function makeBot(i) {
+  const base = BOT_COLS[i % BOT_COLS.length];
+  const mat = new THREE.MeshLambertMaterial({ color: base });
+  const tan = new THREE.MeshLambertMaterial({ color: 0xd9b98f });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  const g = new THREE.Group();
+  const add = (geo, m, x, y, z, sx, sy, sz) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.scale.set(sx, sy === undefined ? sx : sy, sz === undefined ? sx : sz); g.add(o); return o; };
+  add(sphereGeo, mat, 0, 0.85, 0, 0.42, 0.5, 0.34);
+  add(sphereGeo, tan, 0, 0.9, -0.2, 0.27, 0.3, 0.13);
+  add(sphereGeo, mat, 0, 1.4, -0.06, 0.2, 0.2, 0.2);
+  add(sphereGeo, tan, 0, 1.36, -0.2, 0.12, 0.1, 0.07);
+  add(sphereGeo, dark, -0.06, 1.44, -0.235, 0.025);
+  add(sphereGeo, dark, 0.06, 1.44, -0.235, 0.025);
+  const beacon = add(octaGeo, beaconMat, 0, 2.05, 0, 0.14, 0.2, 0.14);
+  beacon.visible = false;
+  const armL = new THREE.Mesh(armGeo, mat), armR = new THREE.Mesh(armGeo, mat);
+  const handL = new THREE.Mesh(handGeo, mat), handR = new THREE.Mesh(handGeo, mat);
+  handL.scale.setScalar(1.3); handR.scale.setScalar(1.3);
+  g.add(armL, armR, handL, handR);
+  scene.add(g);
+  return { isPlayer: false, name: BOT_NAMES[i % BOT_NAMES.length], base, mat, group: g, beacon, armL, armR, handL, handR,
+    pos: new V3(), vel: new V3(), dir: new V3(), yaw: 0, infected: false, onGround: true, phase: Math.random() * 6,
+    steerT: Math.random() * 0.2, jumpCd: 0, sv: 0.9 + Math.random() * 0.2, want: false, speed: 0, wander: new V3(), wanderT: 0 };
+}
+function setBotLook(b) {
+  if (b.infected) { b.mat.color.set(0xc93b32); b.mat.emissive.set(0x3a0805); }
+  else { b.mat.color.set(b.base); b.mat.emissive.set(0x000000); }
+  b.beacon.visible = b.infected;
+}
+function buildBots(n) {
+  for (const b of bots) scene.remove(b.group);
+  bots = [];
+  for (let i = 0; i < n; i++) bots.push(makeBot(i));
+}
+
+/* ============================== round flow ============================== */
+function readSettings() {
+  G.botCount = +$('optBots').value; G.diff = +$('optDiff').value; G.roundTime = +$('optTime').value;
+}
+function flash(l1, l2, l3, dur = 3) { G.flash = { lines: [l1, l2 || '', l3 || ''], t: dur, dur }; }
+
+function startLobby() {
+  readSettings();
+  if (bots.length !== G.botCount) buildBots(G.botCount);
+  G.state = 'lobby'; G.stateT = 0; G.timeLeft = G.roundTime; G.round++;
+  G.lobbyDur = G.playerActive ? (G.round <= 1 ? 10 : LOBBY) : 2;
+  G.flash = null; G.last = '';
+  P.infected = false; updatePlayerLook();
+  ents = G.playerActive ? [P] : [];
+  const slots = bots.length + 1;
+  bots.forEach((b, i) => {
+    const ang = ((i + 1) / slots) * Math.PI * 2;
+    b.pos.set(Math.cos(ang) * 15, 0, Math.sin(ang) * 15);
+    b.vel.set(0, 0, 0); b.dir.set(0, 0, 0); b.want = false; b.infected = false; b.onGround = true;
+    b.yaw = Math.atan2(Math.cos(ang), Math.sin(ang));
+    setBotLook(b); ents.push(b);
+  });
+  needSpawn = G.playerActive;
+}
+function infect(v, by) {
+  v.infected = true;
+  if (v.isPlayer) { updatePlayerLook(); ctrls.forEach(c => buzz(c, 1, 250)); flash('You are infected', 'Touch everyone else', '', 2.5); }
+  else setBotLook(v);
+  if (by && by.isPlayer) { stats.tags++; ctrls.forEach(c => buzz(c, 0.8, 120)); }
+  G.last = by ? by.name + ' tagged ' + v.name : v.name + ' is infected';
+  sfx.tag();
+}
+function startPlaying() {
+  G.state = 'playing'; G.stateT = 0; sfx.start();
+  let pick;
+  if (G.playerActive && Math.random() < 0.34) pick = P;
+  else { const bs = ents.filter(e => !e.isPlayer); pick = bs[Math.floor(Math.random() * bs.length)]; }
+  pick.infected = true;
+  if (pick.isPlayer) { updatePlayerLook(); flash('You are infected', 'Released in 3 seconds. Tag everyone.', '', 3.5); G.last = 'You start infected'; }
+  else { setBotLook(pick); flash(pick.name + ' is infected', 'Run. Infected is released in 3 seconds.', '', 3.5); G.last = pick.name + ' starts infected'; }
+}
+function endRound(kind) {
+  G.state = 'results'; G.stateT = 0;
+  const left = ents.filter(e => !e.infected).length;
+  if (kind === 'time') {
+    if (G.playerActive && !P.infected) { stats.survived++; G.resultLines = ['You survived', left + ' of ' + ents.length + ' made it', 'Next round soon']; sfx.win(); }
+    else { G.resultLines = ['Time is up', left + ' survivor' + (left === 1 ? '' : 's') + ' escaped', 'Next round soon']; if (G.playerActive) sfx.lose(); }
+  } else {
+    G.resultLines = ['Everyone is infected', 'The infection wins this round', 'Next round soon'];
+    if (G.playerActive) sfx.lose();
+  }
+  G.flash = null;
+}
+function tagChecks() {
+  if (G.stateT < FREEZE) return;
+  // player tags bots
+  if (G.playerActive && P.infected) {
+    for (const b of bots) {
+      if (b.infected) continue;
+      const cy = b.pos.y + 0.85; let hit = false;
+      for (const c of ctrls) if (c.valid && Math.hypot(c.hw.x - b.pos.x, c.hw.y - cy, c.hw.z - b.pos.z) < 0.6) hit = true;
+      if (!hit && Math.hypot(headW.x - b.pos.x, headW.y - cy, headW.z - b.pos.z) < 0.8) hit = true;
+      if (!hit && Math.hypot(headW.x - b.pos.x, headW.y - 0.5 - cy, headW.z - b.pos.z) < 0.8) hit = true;
+      if (hit) infect(b, P);
+    }
+  }
+  // bots tag the player
+  if (G.playerActive && !P.infected) {
+    for (const b of bots) {
+      if (!b.infected) continue;
+      const cy = b.pos.y + 0.85; let hit = false;
+      for (const c of ctrls) if (c.valid && Math.hypot(c.hw.x - b.pos.x, c.hw.y - cy, c.hw.z - b.pos.z) < 0.6) hit = true;
+      if (!hit && Math.hypot(headW.x - b.pos.x, headW.y - cy, headW.z - b.pos.z) < 0.8) hit = true;
+      if (!hit && Math.hypot(headW.x - b.pos.x, headW.y - 0.5 - cy, headW.z - b.pos.z) < 0.8) hit = true;
+      if (hit) { infect(P, b); break; }
+    }
+  }
+  // bots tag bots
+  for (const a of bots) {
+    if (!a.infected) continue;
+    for (const b of bots) {
+      if (b.infected) continue;
+      if (Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y, a.pos.z - b.pos.z) < 0.95) infect(b, a);
+    }
+  }
+}
+let lastTick = -1;
+function updateGame(dt) {
+  G.stateT += dt;
+  if (G.flash) { G.flash.t -= dt; if (G.flash.t <= 0) G.flash = null; }
+  if (G.state === 'lobby') {
+    const left = Math.ceil(G.lobbyDur - G.stateT);
+    if (G.playerActive && left <= 3 && left !== lastTick && left > 0) { lastTick = left; sfx.tick(); }
+    if (G.stateT >= G.lobbyDur) startPlaying();
+  } else if (G.state === 'playing') {
+    G.timeLeft -= dt;
+    tagChecks();
+    const left = ents.filter(e => !e.infected).length;
+    if (left === 0) endRound('all');
+    else if (G.timeLeft <= 0) endRound('time');
+  } else if (G.state === 'results') {
+    if (G.stateT >= 8) startLobby();
+  }
+}
+
+/* ============================== bot AI ============================== */
+function blockedAt(x, z, y) {
+  if (Math.abs(x) > ARENA - 1.3 || Math.abs(z) > ARENA - 1.3) return true;
+  for (let i = 0; i < SOLID.length; i++) {
+    const b = SOLID[i];
+    if (x > b.min.x - 0.45 && x < b.max.x + 0.45 && z > b.min.z - 0.45 && z < b.max.z + 0.45 && b.max.y > y + 1.45 && b.min.y < y + 1.3) return true;
+  }
+  return false;
+}
+function stepAhead(x, z, y) {
+  for (let i = 0; i < SOLID.length; i++) {
+    const b = SOLID[i];
+    if (x > b.min.x - 0.3 && x < b.max.x + 0.3 && z > b.min.z - 0.3 && z < b.max.z + 0.3 && b.max.y > y + 0.25 && b.max.y < y + 1.5 && b.min.y < y + 0.6) return true;
+  }
+  return false;
+}
+function steer(b, wx, wz) {
+  const l = Math.hypot(wx, wz);
+  if (l < 1e-3) return null;
+  const nx = wx / l, nz = wz / l;
+  let best = -1e9, bx = 0, bz = 0;
+  for (let k = 0; k < 16; k++) {
+    const a = k * Math.PI / 8, dx = Math.cos(a), dz = Math.sin(a);
+    let s = dx * nx + dz * nz;
+    if (b.dir.lengthSq() > 0) s += 0.3 * (dx * b.dir.x + dz * b.dir.z);
+    if (blockedAt(b.pos.x + dx * 0.9, b.pos.z + dz * 0.9, b.pos.y)) s -= 3;
+    if (blockedAt(b.pos.x + dx * 2.2, b.pos.z + dz * 2.2, b.pos.y)) s -= 1.2;
+    if (blockedAt(b.pos.x + dx * 3.6, b.pos.z + dz * 3.6, b.pos.y)) s -= 0.5;
+    if (s > best) { best = s; bx = dx; bz = dz; }
+  }
+  return [bx, bz];
+}
+const _bc = new V3(), _bo = new V3();
+function updateBot(b, dt) {
+  const live = G.state === 'playing' && !(b.infected && G.stateT < FREEZE);
+  let wx = 0, wz = 0, speed = 0;
+  if (live) {
+    if (b.infected) {
+      let tgt = null, bd = 1e9;
+      for (const e of ents) {
+        if (e === b || e.infected) continue;
+        const d = Math.hypot(e.pos.x - b.pos.x, e.pos.z - b.pos.z);
+        if (d < bd) { bd = d; tgt = e; }
+      }
+      if (tgt) {
+        const lead = Math.min(0.6, bd / 7);
+        const tv = tgt.isPlayer ? tgt.evel : tgt.vel;
+        wx = tgt.pos.x + tv.x * lead - b.pos.x; wz = tgt.pos.z + tv.z * lead - b.pos.z;
+        speed = 3.7 * G.diff * b.sv;
+      }
+    } else {
+      let tx = 0, tz = 0, th = 0, near = 99;
+      for (const e of ents) {
+        if (!e.infected) continue;
+        const dx = b.pos.x - e.pos.x, dz = b.pos.z - e.pos.z, d = Math.hypot(dx, dz) + 0.001;
+        near = Math.min(near, d);
+        if (d < 20) { const w = Math.pow(1 - d / 20, 2) * 2; tx += dx / d * w; tz += dz / d * w; th += w; }
+      }
+      const ex = Math.max(0, Math.abs(b.pos.x) - 12), ez = Math.max(0, Math.abs(b.pos.z) - 12);
+      tx -= Math.sign(b.pos.x) * ex * 0.2; tz -= Math.sign(b.pos.z) * ez * 0.2;
+      if (th > 0.05) { wx = tx; wz = tz; speed = 3.3 * G.diff * b.sv * (near < 4 ? 1.1 : 1); }
+      else {
+        b.wanderT -= dt;
+        if (b.wanderT <= 0) { b.wanderT = 2 + Math.random() * 3; b.wander.set((Math.random() * 2 - 1) * 10, 0, (Math.random() * 2 - 1) * 10); }
+        wx = b.wander.x - b.pos.x; wz = b.wander.z - b.pos.z;
+        speed = Math.hypot(wx, wz) > 1.5 ? 1.6 : 0;
+      }
+    }
+  }
+  b.speed = speed;
+  b.steerT -= dt;
+  if (b.steerT <= 0) {
+    b.steerT = 0.1 + Math.random() * 0.08;
+    const r = speed > 0 ? steer(b, wx, wz) : null;
+    if (r) { b.dir.set(r[0], 0, r[1]); b.want = true; } else b.want = false;
+  }
+  const tvx = b.want ? b.dir.x * speed : 0, tvz = b.want ? b.dir.z * speed : 0;
+  const acc = b.onGround ? 9 : 2;
+  b.vel.x += (tvx - b.vel.x) * Math.min(1, acc * dt);
+  b.vel.z += (tvz - b.vel.z) * Math.min(1, acc * dt);
+  b.jumpCd -= dt;
+  if (b.onGround && b.want && b.jumpCd <= 0 && stepAhead(b.pos.x + b.dir.x * 0.8, b.pos.z + b.dir.z * 0.8, b.pos.y)) { b.vel.y = 5.8; b.jumpCd = 0.6; }
+  b.vel.y -= GRAV * dt;
+  b.pos.addScaledVector(b.vel, dt);
+  b.onGround = false;
+  for (let it = 0; it < 2; it++) {
+    for (const h of [0.35, 1.0]) {
+      _bc.set(b.pos.x, b.pos.y + h, b.pos.z); _bo.copy(_bc);
+      if (collideSphere(_bc, 0.35, 0.35)) {
+        b.pos.x += _bc.x - _bo.x; b.pos.y += _bc.y - _bo.y; b.pos.z += _bc.z - _bo.z;
+        if (hitN.y > 0.6) { if (b.vel.y < 0) b.vel.y = 0; b.onGround = true; }
+        else {
+          const vn = b.vel.x * hitN.x + b.vel.y * hitN.y + b.vel.z * hitN.z;
+          if (vn < 0) { b.vel.x -= vn * hitN.x; b.vel.y -= vn * hitN.y; b.vel.z -= vn * hitN.z; }
+        }
+      }
+    }
+  }
+  if (b.pos.y < -4 || Math.abs(b.pos.x) > ARENA + 1 || Math.abs(b.pos.z) > ARENA + 1) {
+    const a = Math.random() * Math.PI * 2; b.pos.set(Math.cos(a) * 15, 0.5, Math.sin(a) * 15); b.vel.set(0, 0, 0);
+  }
+  if (Math.hypot(b.vel.x, b.vel.z) > 0.6) b.yaw -= angDiff(b.yaw, Math.atan2(-b.vel.x, -b.vel.z)) * Math.min(1, 10 * dt);
+}
+function updateBots(dt) {
+  for (const b of bots) updateBot(b, dt);
+  for (let i = 0; i < bots.length; i++) for (let j = i + 1; j < bots.length; j++) {
+    const a = bots[i], b = bots[j], dx = b.pos.x - a.pos.x, dz = b.pos.z - a.pos.z, d = Math.hypot(dx, dz);
+    if (d < 0.8 && d > 1e-4) { const p = (0.8 - d) * 0.5 / d; a.pos.x -= dx * p; a.pos.z -= dz * p; b.pos.x += dx * p; b.pos.z += dz * p; }
+  }
+}
+const _s = new V3(), _h = new V3();
+function animateBot(b, dt) {
+  b.group.position.copy(b.pos); b.group.rotation.y = b.yaw;
+  const sp = Math.hypot(b.vel.x, b.vel.z);
+  b.phase += sp * dt * 2.4;
+  const amp = Math.min(1, sp / 2);
+  for (const s of [-1, 1]) {
+    const ph = b.phase + (s > 0 ? 0 : Math.PI);
+    let hx = s * 0.44, hy = 0.12, hz = -0.1;
+    if (!b.onGround) { hy = 0.95; hz = -0.3; }
+    else { hz = -0.1 - Math.sin(ph) * 0.5 * amp; hy = 0.12 + Math.max(0, Math.cos(ph)) * 0.28 * amp; }
+    _s.set(s * 0.38, 1.1, 0); _h.set(hx, hy, hz);
+    const hand = s < 0 ? b.handL : b.handR, arm = s < 0 ? b.armL : b.armR;
+    hand.position.copy(_h); link(arm, _s, _h);
+  }
+  if (b.beacon.visible) { b.beacon.rotation.y += dt * 3; b.beacon.position.y = 2.05 + Math.sin(performance.now() * 0.004) * 0.06; }
+}
+
+/* ============================== player movement ============================== */
+const _a = new V3(), _b = new V3(), _d = new V3(), _hw = new V3(), _o = new V3(), _t = new V3(), _v = new V3(), _c = new V3();
+function snapTurn(angle) {
+  _a.copy(headL).applyQuaternion(rig.quaternion).add(rig.position);
+  rig.rotation.y += angle;
+  rig.updateMatrixWorld(true);
+  _b.copy(headL).applyQuaternion(rig.quaternion).add(rig.position);
+  rig.position.add(_a.sub(_b));
+}
+function placePlayer() {
+  const xc = renderer.xr.getCamera();
+  _a.set(0, 0, -1).applyQuaternion(xc.quaternion);
+  const al = Math.atan2(-_a.x, -_a.z);
+  rig.rotation.set(0, Math.PI / 2 - al, 0);
+  rig.updateMatrixWorld(true);
+  _b.set(headL.x, 0, headL.z).applyQuaternion(rig.quaternion);
+  rig.position.set(G.spawn.x - _b.x, 0.6, G.spawn.z - _b.z);
+  P.vel.set(0, 0, 0);
+  for (const c of ctrls) { c.valid = false; c.touching = false; c.samples.length = 0; }
+}
+function readInputs(dt) {
+  for (const c of ctrls) {
+    const gp = c.src && c.src.gamepad;
+    if (!gp) continue;
+    const ax = gp.axes.length > 2 ? gp.axes[2] : gp.axes[0] || 0;
+    if (Math.abs(ax) < 0.4) c.snapReady = true;
+    else if (Math.abs(ax) > 0.7 && c.snapReady) { snapTurn(ax > 0 ? -Math.PI / 6 : Math.PI / 6); c.snapReady = false; }
+    const pressed = !!(gp.buttons[5] && gp.buttons[5].pressed);
+    if (pressed && !c.btn) placePlayer();
+    c.btn = pressed;
+  }
+}
+/* One hand: resolve against the world, drag the rig, collect push-off samples. Returns touching. */
+function updateHand(c, dt) {
+  const pl = c.grip.position;
+  if (!c.src || pl.lengthSq() < 1e-6) { c.valid = false; c.touching = false; c.samples.length = 0; return false; }
+  if (!c.valid) { c.prev.copy(pl); c.valid = true; c.touching = false; c.samples.length = 0; }
+  _d.copy(pl).sub(c.prev).applyQuaternion(rig.quaternion);   // hand motion relative to the body, in world axes
+  c.prev.copy(pl);
+  _hw.copy(pl).applyQuaternion(rig.quaternion).add(rig.position);
+  _o.copy(_hw);
+  const touching = collideSphere(_hw, HAND_R, HAND_DET);
+  if (touching) {
+    rig.position.x += _hw.x - _o.x; rig.position.y += _hw.y - _o.y; rig.position.z += _hw.z - _o.z;
+    const n = hitN, dn = _d.dot(n);
+    _t.copy(_d).addScaledVector(n, -dn);
+    rig.position.addScaledVector(_t, -hitF);                  // sticky grip along the surface
+    _v.copy(_d).divideScalar(dt);
+    if (_v.dot(n) <= 0.35 * _v.length()) { c.samples.push(_v.clone()); if (c.samples.length > 5) c.samples.shift(); }
+    if (!c.touching) {
+      const closing = Math.max(0, -_v.dot(n));
+      sfx.thump(closing); buzz(c, clamp(0.15 + closing * 0.1, 0.1, 0.8), 25);
+    }
+    if (n.y > 0.5) { if (P.vel.y < 0) P.vel.y = 0; }
+    else { const vn = P.vel.dot(n); if (vn < 0) P.vel.addScaledVector(n, -vn); }
+    if (hitF > 0.01) { const k = Math.exp(-6 * hitF * dt); P.vel.x *= k; P.vel.z *= k; }
+  } else if (c.touching) {
+    if (c.samples.length) {
+      _t.set(0, 0, 0);
+      for (const s of c.samples) _t.add(s);
+      _t.multiplyScalar(-PUSH_MULT / c.samples.length);
+      const mag = _t.length();
+      if (mag > 0.8) {
+        if (mag > MAX_PUSH) _t.multiplyScalar(MAX_PUSH / mag);
+        P.vel.copy(_t); sfx.push(); buzz(c, clamp(mag * 0.1, 0.1, 0.7), 35);
+      }
+    }
+    c.samples.length = 0;
+  }
+  c.touching = touching;
+  c.hw.copy(_hw);
+  return touching;
+}
+let hitFloorF = 1;
+const prevHead = new V3(); let prevHeadOk = false;
+function updatePlayer(dt) {
+  const xc = renderer.xr.getCamera();
+  headL.copy(xc.position);
+  if (needSpawn) { if (headL.y < 0.3) return; placePlayer(); needSpawn = false; prevHeadOk = false; }
+  readInputs(dt);
+  P.vel.y -= GRAV * dt;
+  P.vel.multiplyScalar(Math.exp(-0.15 * dt));
+  rig.position.addScaledVector(P.vel, dt);
+  let anyHand = false;
+  for (const c of ctrls) if (updateHand(c, dt)) anyHand = true;
+  // head and body colliders
+  let grounded = false;
+  for (let k = 0; k < 2; k++) {
+    _a.copy(headL).applyQuaternion(rig.quaternion).add(rig.position);
+    _c.set(_a.x, _a.y - (k ? BODY_DROP : 0), _a.z); _o.copy(_c);
+    const r = k ? BODY_R : HEAD_R;
+    if (collideSphere(_c, r, r)) {
+      rig.position.x += _c.x - _o.x; rig.position.y += _c.y - _o.y; rig.position.z += _c.z - _o.z;
+      if (hitN.y > 0.5) { if (k === 1) { grounded = true; hitFloorF = hitF; } if (P.vel.y < 0) P.vel.y = 0; }
+      else { const vn = P.vel.dot(hitN); if (vn < 0) P.vel.addScaledVector(hitN, -vn); }
+    }
+  }
+  if (grounded && !anyHand) { const k = Math.exp(-1.5 * Math.max(0.05, hitFloorF) * dt); P.vel.x *= k; P.vel.z *= k; }
+  headW.copy(headL).applyQuaternion(rig.quaternion).add(rig.position);
+  // safety net
+  if (rig.position.y < -6 || Math.abs(headW.x) > ARENA + 3 || Math.abs(headW.z) > ARENA + 3) placePlayer();
+  // entity state for the bots
+  P.pos.set(headW.x, headW.y - (BODY_DROP + BODY_R), headW.z);
+  if (prevHeadOk) _b.copy(headW).sub(prevHead).divideScalar(dt); else _b.set(0, 0, 0);
+  P.evel.lerp(_b, 0.25);
+  prevHead.copy(headW); prevHeadOk = true;
+}
+
+/* ============================== HUD panels ============================== */
+function makePanel(w, h, pw, ph) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, fog: false });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), mat);
+  mesh.renderOrder = 999; mesh.visible = false; scene.add(mesh);
+  return { cv, ctx: cv.getContext('2d'), tex, mat, mesh, key: '', yaw: 0 };
+}
+function rrect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+const hud = makePanel(512, 200, 0.46, 0.18);
+const center = makePanel(1024, 300, 1.5, 0.44);
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+function fmtTime(s) { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function drawHUD() {
+  const role = !G.playerActive ? 'SPECTATING' : P.infected ? 'INFECTED' : 'SURVIVOR';
+  const left = ents.filter(e => !e.infected).length;
+  const rel = G.state === 'playing' ? Math.max(0, Math.ceil(FREEZE - G.stateT)) : 0;
+  const key = [role, G.state, Math.ceil(G.timeLeft), left, ents.length, stats.tags, stats.survived, G.last, rel].join('|');
+  if (key === hud.key) return;
+  hud.key = key;
+  const x = hud.ctx;
+  x.clearRect(0, 0, 512, 200);
+  x.fillStyle = 'rgba(10,20,14,0.82)'; rrect(x, 4, 4, 504, 192, 26); x.fill();
+  x.fillStyle = P.infected && G.playerActive ? '#ff5d4d' : '#b8f23c'; rrect(x, 22, 20, 190, 44, 22); x.fill();
+  x.fillStyle = '#10200a'; x.font = '800 26px ' + FONT; x.textAlign = 'center'; x.fillText(role, 117, 52);
+  x.fillStyle = '#f2f7ea'; x.textAlign = 'left'; x.font = '800 64px ' + FONT;
+  x.fillText(G.state === 'playing' ? fmtTime(G.timeLeft) : G.state === 'lobby' ? 'Ready' : 'Done', 230, 62);
+  x.font = '700 26px ' + FONT; x.fillStyle = '#a9bfae';
+  x.fillText(left + ' of ' + ents.length + ' safe', 24, 104);
+  x.textAlign = 'right'; x.fillText('Tags ' + stats.tags + '   Survived ' + stats.survived, 490, 104);
+  x.textAlign = 'left'; x.fillStyle = '#f2f7ea'; x.font = '600 25px ' + FONT;
+  const line = rel > 0 ? 'Infected released in ' + rel : G.last;
+  x.fillText(line, 24, 160);
+  hud.tex.needsUpdate = true;
+}
+function drawCenter(lines, alpha) {
+  const key = lines.join('|');
+  if (key !== center.key) {
+    center.key = key;
+    const x = center.ctx;
+    x.clearRect(0, 0, 1024, 300);
+    x.fillStyle = 'rgba(10,20,14,0.84)'; rrect(x, 6, 6, 1012, 288, 40); x.fill();
+    x.textAlign = 'center';
+    x.fillStyle = '#f2f7ea'; x.font = '800 92px ' + FONT; x.fillText(lines[0], 512, 130);
+    x.fillStyle = '#b8f23c'; x.font = '700 50px ' + FONT; x.fillText(lines[1], 512, 205);
+    x.fillStyle = '#a9bfae'; x.font = '600 36px ' + FONT; x.fillText(lines[2], 512, 258);
+    center.tex.needsUpdate = true;
+  }
+  center.mat.opacity = alpha;
+}
+function placePanel(p, dist, yOff, rate, dt) {
+  _a.set(0, 0, -1).applyQuaternion(renderer.xr.getCamera().quaternion).applyQuaternion(rig.quaternion);
+  const yaw = Math.atan2(-_a.x, -_a.z);
+  if (!p.init) { p.yaw = yaw; p.init = true; }
+  p.yaw -= angDiff(p.yaw, yaw) * (1 - Math.exp(-rate * dt));
+  p.mesh.position.set(headW.x - Math.sin(p.yaw) * dist, headW.y + yOff, headW.z - Math.cos(p.yaw) * dist);
+  p.mesh.lookAt(headW);
+}
+
+/* ============================== visuals ============================== */
+let orbitT = 0;
+const _sh = new V3();
+function updateVisuals(dt, xr) {
+  for (const b of bots) animateBot(b, dt);
+  if (xr && G.playerActive) {
+    const yawV = _a.set(0, 0, -1).applyQuaternion(renderer.xr.getCamera().quaternion).applyQuaternion(rig.quaternion);
+    const yaw = Math.atan2(-yawV.x, -yawV.z), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    for (const c of ctrls) {
+      if (!c.valid) { c.mesh.visible = false; c.arm.visible = false; continue; }
+      _hw.copy(c.grip.position).applyQuaternion(rig.quaternion).add(rig.position);
+      c.hw.copy(_hw);
+      c.mesh.position.copy(_hw); c.mesh.visible = true;
+      _sh.set(headW.x + rx * 0.2 * c.side, headW.y - 0.3, headW.z + rz * 0.2 * c.side);
+      link(c.arm, _sh, _hw);
+    }
+    drawHUD(); hud.mesh.visible = true; placePanel(hud, 0.95, -0.55, 2.5, dt);
+    let lines = null, alpha = 1;
+    if (G.flash) { lines = G.flash.lines; alpha = Math.min(1, G.flash.t / 0.5); }
+    else if (G.state === 'lobby') {
+      const left = Math.max(1, Math.ceil(G.lobbyDur - G.stateT));
+      lines = ['Get ready', 'Round starts in ' + left, G.round <= 1 ? 'Push off the ground and walls with your hands' : ''];
+    } else if (G.state === 'results' && G.resultLines) lines = G.resultLines;
+    if (lines) { drawCenter(lines, alpha); center.mesh.visible = true; placePanel(center, 1.7, 0.1, 2.0, dt); }
+    else center.mesh.visible = false;
+  } else {
+    for (const c of ctrls) { c.mesh.visible = false; c.arm.visible = false; }
+    hud.mesh.visible = false; center.mesh.visible = false; hud.init = center.init = false;
+    orbitT += dt * 0.12;
+    camera.position.set(Math.cos(orbitT) * 27, 13, Math.sin(orbitT) * 27);
+    camera.lookAt(0, 2, 0);
+  }
+}
+
+/* ============================== main loop ============================== */
+let lastT = 0;
+renderer.setAnimationLoop(time => {
+  const dt = clamp((time - lastT) / 1000, 0.001, 0.05);
+  lastT = time;
+  const xr = renderer.xr.isPresenting;
+  if (xr && G.playerActive) updatePlayer(dt);
+  updateGame(dt);
+  updateBots(dt);
+  updateVisuals(dt, xr);
+  renderer.render(scene, camera);
+});
+
+/* ============================== session and UI ============================== */
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener('resize', onResize);
+renderer.xr.addEventListener('sessionstart', () => {
+  G.playerActive = true; $('ui').style.display = 'none'; audioOn(); startLobby();
+});
+renderer.xr.addEventListener('sessionend', () => {
+  G.playerActive = false; $('ui').style.display = ''; rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);
+  for (const c of ctrls) { c.valid = false; c.touching = false; }
+  startLobby(); onResize();
+});
+['optBots', 'optDiff', 'optTime'].forEach(id => $(id).addEventListener('change', () => { if (!G.playerActive) startLobby(); }));
+
+const btn = $('enter'), note = $('note');
+async function checkXR() {
+  if (!navigator.xr) {
+    note.textContent = window.isSecureContext ? 'WebXR is not available in this browser. Open this page in the Meta Quest Browser.' : 'WebXR needs HTTPS. Host this file on an HTTPS site, then open it in the Meta Quest Browser.';
+    return;
+  }
+  try {
+    const ok = await navigator.xr.isSessionSupported('immersive-vr');
+    if (ok) { btn.disabled = false; note.textContent = 'Ready. Put the headset on and press Enter VR. Stand with room around you.'; }
+    else note.textContent = 'Immersive VR is not supported here. Open this page in the Meta Quest Browser on a Quest 3 or 3S.';
+  } catch (e) { note.textContent = 'Could not check VR support: ' + (e && e.message ? e.message : e); }
+}
+btn.addEventListener('click', async () => {
+  audioOn();
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
+    await renderer.xr.setSession(session);
+  } catch (err) { note.textContent = 'Could not start VR: ' + (err && err.message ? err.message : err); }
+});
+checkXR();
+startLobby();
+</script>
+</body>
+</html>
